@@ -1,0 +1,51 @@
+#include <EasyNextionLibrary.h>
+
+// Pin untuk UART1
+#define NEXTION_RX 9   // RX Pin ESP32 untuk Nextion
+#define NEXTION_TX 10  // TX Pin ESP32 untuk Nextion
+
+// Inisialisasi HardwareSerial untuk UART1
+HardwareSerial SerialNextion(1);
+
+// Inisialisasi EasyNextion menggunakan SerialNextion
+EasyNex myNex(SerialNextion);
+
+String generateRandomString(int length);
+
+void setup() {
+  // Inisialisasi komunikasi serial untuk debugging dan Nextion
+  Serial.begin(115200); // Serial untuk debugging
+  SerialNextion.begin(9600, SERIAL_8N1, NEXTION_RX, NEXTION_TX); // SerialNextion untuk Nextion
+
+  // Tunggu koneksi stabil
+  delay(1000);
+}
+
+void loop() {
+  // Kirim string random ke t0-t5
+  myNex.writeStr("t0.txt", generateRandomString(5));
+  myNex.writeStr("t1.txt", generateRandomString(8));
+  myNex.writeStr("t2.txt", generateRandomString(10));
+  myNex.writeStr("t3.txt", generateRandomString(6));
+  myNex.writeStr("t4.txt", generateRandomString(7));
+  myNex.writeStr("t5.txt", generateRandomString(9));
+
+  // Cetak ke serial monitor untuk debugging
+  Serial.println("String random dikirim ke Nextion");
+
+  // Delay antara pengiriman data
+  delay(1000); // Kirim data setiap 1 detik
+}
+
+// Fungsi untuk menghasilkan string random
+String generateRandomString(int length) {
+  String randomString = "";
+  char characters[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+  for (int i = 0; i < length; i++) {
+    int randomIndex = random(0, strlen(characters));
+    randomString += characters[randomIndex];
+  }
+
+  return randomString;
+}

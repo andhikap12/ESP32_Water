@@ -1,0 +1,125 @@
+// Set GSM and MQTT credentials
+#define TINY_GSM_MODEM_SIM800
+
+#include <TinyGsmClient.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+
+const char apn[] = "Indosatgprs";         // Ganti dengan APN provider SIM Anda
+const char user[] = "water_quality";                // Ganti dengan username provider
+const char pass[] = "f98tYucDJ54HgXwa";                // Ganti dengan password provider
+const char broker[] = "112.78.33.179"; // Ganti dengan alamat broker MQTT
+const int brokerPort = 1883;            // Default MQTT port
+
+// Hardware Serial untuk SIM800
+#define RX_PIN 16
+#define TX_PIN 17
+#define RST_PIN 15
+HardwareSerial SerialAT(1);
+
+// TinyGSM objek
+TinyGsm        modem(SerialAT);
+TinyGsmClient client(modem);
+PubSubClient mqtt(client);
+
+// Function prototypes
+void reconnectMQTT();
+
+void setupModem() {
+  pinMode(RST_PIN, OUTPUT);
+  digitalWrite(RST_PIN, HIGH);
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  digitalWrite(RST_PIN, LOW);
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  digitalWrite(RST_PIN, HIGH);
+
+  Serial.println("Restarting modem...");
+  modem.restart();
+
+  String modemInfo = modem.getModemInfo();
+  Serial.print("Modem Info: ");
+  Serial.println(modemInfo);
+
+  Serial.println("Connecting to GSM network...");
+  if (!modem.waitForNetwork()) {
+    Serial.println("Network connection failed");
+    return;
+  }
+  Serial.println("Connected to GSM network");
+
+  Serial.println("Setting up GPRS...");
+  if (!modem.gprsConnect("internet", "", "")) {
+    Serial.println("GPRS connection failed");
+    return;
+  }
+  Serial.println("GPRS connected");
+}
+
+void setup() {
+  Serial.begin(115200); // Debug serial
+  SerialAT.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
+  pinMode(RST_PIN, OUTPUT);
+
+  setupModem();
+
+  // Atur broker MQTT
+  mqtt.setServer(broker, brokerPort);
+}
+
+void loop() {
+  Serial.println("Connecting to GSM network...");
+    if (!modem.waitForNetwork()) {
+      Serial.println("Network connection failed");
+      return;
+    }
+    Serial.println("Connected to GSM network");
+
+    if (!modem.isGprsConnected()) {
+      Serial.println("GPRS disconnected!");
+      Serial.print(F("Connecting to "));
+      Serial.print("internet");
+      if (!modem.gprsConnect("Indosatgprs", "", "")) {
+        Serial.println("GPRS connection failed");
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        return;
+      }
+      if (modem.isGprsConnected()) { Serial.println("GPRS reconnected"); }
+    }
+
+  if (!mqtt.connected()) {
+    reconnectMQTT();
+  }
+  mqtt.loop();
+
+  // Buat data JSON
+  StaticJsonDocument<200> jsonDoc;
+  jsonDoc["temperature"] = 25.5;  // Contoh data suhu
+  jsonDoc["humidity"] = 60;      // Contoh data kelembapan
+  jsonDoc["Status Sensor"] = "0";      // Contoh status
+
+  // Konversi JSON ke string
+  char jsonBuffer[200];
+  serializeJson(jsonDoc, jsonBuffer);
+
+  // Publish data JSON ke MQTT
+  if (mqtt.publish("/varx/water-quality/testing", jsonBuffer)) {
+    Serial.println("JSON data sent successfully!");
+  } else {
+    Serial.println("Failed to send JSON data");
+  }
+  delay(5000); // Kirim setiap 5 detik
+}
+
+void reconnectMQTT() {
+  while (!mqtt.connected()) {
+    Serial.print("Connecting to MQTT broker...");
+    if (mqtt.connect("ESP32Client", user, pass)) {
+      Serial.println("Connected to MQTT broker!");
+    } else {
+      Serial.print("Failed, rc=");
+      Serial.print(mqtt.state());
+      Serial.println(" Retrying in 5 seconds...");
+      delay(5000);
+    }
+  }
+}

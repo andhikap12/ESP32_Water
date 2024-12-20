@@ -1,0 +1,144 @@
+#define TINY_GSM_MODEM_SIM800
+
+#include <EasyNextionLibrary.h>
+#include <TinyGsmClient.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+
+// Pin untuk UART1 dan UART2
+#define NEXTION_RX 9   // RX Pin ESP32 untuk Nextion
+#define NEXTION_TX 10  // TX Pin ESP32 untuk Nextion
+#define GSM_RX 16      // RX Pin ESP32 untuk GSM
+#define GSM_TX 17      // TX Pin ESP32 untuk GSM
+#define GSM_RST 15     // Reset Pin untuk GSM
+
+// Inisialisasi Serial untuk masing-masing perangkat
+HardwareSerial SerialNextion(1);
+HardwareSerial SerialAT(2);
+
+// Objek untuk Nextion dan GSM/MQTT
+EasyNex myNex(SerialNextion);
+TinyGsm modem(SerialAT);
+TinyGsmClient client(modem);
+PubSubClient mqtt(client);
+
+// Nextion-related function
+String generateRandomString(int length);
+
+// MQTT credentials
+const char apn[] = "internet";         
+const char user[] = "water_quality";                
+const char pass[] = "f98tYucDJ54HgXwa";                
+const char broker[] = "112.78.33.179"; 
+const int brokerPort = 1883;
+
+// Function prototypes
+void setupModem();
+void reconnectMQTT();
+
+void setup() {
+  // Serial untuk debugging
+  Serial.begin(115200);
+
+  // Inisialisasi Nextion
+  SerialNextion.begin(9600, SERIAL_8N1, NEXTION_RX, NEXTION_TX);
+  myNex.begin(SerialNextion);
+
+  // Inisialisasi GSM/MQTT
+  SerialAT.begin(9600, SERIAL_8N1, GSM_RX, GSM_TX);
+  pinMode(GSM_RST, OUTPUT);
+  setupModem();
+
+  // Atur broker MQTT
+  mqtt.setServer(broker, brokerPort);
+}
+
+void loop() {
+  // Nextion handling
+  myNex.writeStr("t0.txt", generateRandomString(5));
+  myNex.writeStr("t1.txt", generateRandomString(8));
+  myNex.writeStr("t2.txt", generateRandomString(10));
+  myNex.writeStr("t3.txt", generateRandomString(6));
+  myNex.writeStr("t4.txt", generateRandomString(7));
+  myNex.writeStr("t5.txt", generateRandomString(9));
+
+  Serial.println("String random dikirim ke Nextion");
+  delay(1000); // Delay 1 detik untuk Nextion
+
+  // GSM and MQTT handling
+  if (!modem.isGprsConnected()) {
+    Serial.println("Reconnecting GPRS...");
+    modem.gprsConnect(apn, "", "");
+  }
+
+  if (!mqtt.connected()) {
+    reconnectMQTT();
+  }
+
+  mqtt.loop();
+
+  // Kirim data JSON ke MQTT
+  StaticJsonDocument<200> jsonDoc;
+  jsonDoc["temperature"] = 25.5;
+  jsonDoc["humidity"] = 60;
+  jsonDoc["Status Sensor"] = "0";
+
+  char jsonBuffer[200];
+  serializeJson(jsonDoc, jsonBuffer);
+
+  if (mqtt.publish("/varx/water-quality/testing", jsonBuffer)) {
+    Serial.println("JSON data sent successfully!");
+  } else {
+    Serial.println("Failed to send JSON data");
+  }
+  delay(5000); // Delay 5 detik untuk MQTT
+}
+
+String generateRandomString(int length) {
+  String randomString = "";
+  char characters[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+  for (int i = 0; i < length; i++) {
+    int randomIndex = random(0, strlen(characters));
+    randomString += characters[randomIndex];
+  }
+
+  return randomString;
+}
+
+void setupModem() {
+  digitalWrite(GSM_RST, HIGH);
+  delay(1000);
+  digitalWrite(GSM_RST, LOW);
+  delay(1000);
+  digitalWrite(GSM_RST, HIGH);
+
+  Serial.println("Restarting modem...");
+  modem.restart();
+
+  if (!modem.waitForNetwork()) {
+    Serial.println("Network connection failed");
+    return;
+  }
+  Serial.println("Connected to GSM network");
+
+  if (!modem.gprsConnect(apn, "", "")) {
+    Serial.println("GPRS connection failed");
+    return;
+  }
+  Serial.println("GPRS connected");
+}
+
+void reconnectMQTT() {
+  while (!mqtt.connected()) {
+    Serial.print("Connecting to MQTT broker...");
+    if (mqtt.connect("ESP32Client", user, pass)) {
+      Serial.println("Connected to MQTT broker!");
+    } else {
+      Serial.print("Failed, rc=");
+      Serial.print(mqtt.state());
+      Serial.println(" Retrying in 5 seconds...");
+      delay(5000);
+    }
+  }
+}

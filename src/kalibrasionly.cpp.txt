@@ -1,0 +1,212 @@
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// Pin Definitions
+#define PH_SENSOR_PIN     36
+#define ORP_SENSOR_PIN    39
+#define TDS_SENSOR_PIN    34
+#define DO_SENSOR_PIN     35
+#define TEMP_SENSOR_PIN   32
+
+// Sensor-related structures
+struct SensorCalibration {
+    float phOffset = 0;
+    float orpOffset = 0;
+    float tdsOffset = -228;
+    float doOffset = 0;
+    float tempOffset = 2.9;
+};
+
+struct SensorStatus {
+    enum Status {
+        ERROR,
+        WORKING,
+        BELOW,
+        ABOVE
+    };
+    
+    Status phStatus = ERROR;
+    Status tdsStatus = ERROR;
+    Status orpStatus = ERROR;
+    Status doStatus = ERROR;
+    Status tempStatus = ERROR;
+};
+
+typedef struct {
+    float ph;
+    float orp;
+    float tds;
+    float doValue;
+    float temperature;
+    bool isConnected;
+} SensorData;
+
+// Global variables
+SensorCalibration sensorCal;
+SensorStatus sensorStatus;
+SensorData sensorData;
+OneWire oneWire(TEMP_SENSOR_PIN);
+DallasTemperature tempSensor(&oneWire);
+
+// Helper functions for sensor readings
+int readAnalogStable(int pin) {
+    int samples[10];
+    for (int i = 0; i < 10; i++) {
+        samples[i] = analogRead(pin);
+        delay(10);
+    }
+    
+    // Sort samples to get median
+    for (int i = 0; i < 9; i++) {
+        for (int j = i + 1; j < 10; j++) {
+            if (samples[i] > samples[j]) {
+                int temp = samples[i];
+                samples[i] = samples[j];
+                samples[j] = temp;
+            }
+        }
+    }
+    
+    return samples[5]; // Return median
+}
+
+float adcToVoltage(int adcValue) {
+    return adcValue * (3.3 / 4095.0);
+}
+
+void printSensorData(const char* sensorName, int rawValue, float voltage, float value) {
+    Serial.print(sensorName);
+    Serial.print(" - Raw: ");
+    Serial.print(rawValue);
+    Serial.print(", Voltage: ");
+    Serial.print(voltage, 3); // 3 decimal places for voltage
+    Serial.print(" V, Value: ");
+    Serial.println(value, 2); // 2 decimal places for final value
+}
+
+// Sensor reading functions
+float readPH() {
+    int rawValue = readAnalogStable(PH_SENSOR_PIN);
+    float voltage = adcToVoltage(rawValue);
+    float phValue = 7.0 + ((2.5 - voltage) / 0.6) + sensorCal.phOffset;
+
+    // Update status
+    if (rawValue <= 0 || rawValue >= 4095) {
+        sensorStatus.phStatus = SensorStatus::ERROR;
+        printSensorData("pH", rawValue, voltage, 0);
+        return 0;
+    }
+    if (phValue < 6.5) {
+        sensorStatus.phStatus = SensorStatus::BELOW;
+    } else if (phValue > 8.5) {
+        sensorStatus.phStatus = SensorStatus::ABOVE;
+    } else {
+        sensorStatus.phStatus = SensorStatus::WORKING;
+    }
+    printSensorData("pH", rawValue, voltage, phValue);
+    return constrain(phValue, 0, 14);
+}
+
+float readTDS() {
+    int rawValue = readAnalogStable(TDS_SENSOR_PIN);
+    float voltage = adcToVoltage(rawValue);
+    float tdsValue = (133.42 * voltage * voltage * voltage) - (255.86 * voltage * voltage) + (857.39 * voltage);
+    float finalValue = tdsValue + sensorCal.tdsOffset;
+
+    if (rawValue <= 0 || rawValue >= 4095) {
+        sensorStatus.tdsStatus = SensorStatus::ERROR;
+        printSensorData("TDS", rawValue, voltage, 0);
+        return 0;
+    }
+    if (finalValue < 50) {
+        sensorStatus.tdsStatus = SensorStatus::BELOW;
+    } else if (finalValue > 500) {
+        sensorStatus.tdsStatus = SensorStatus::ABOVE;
+    } else {
+        sensorStatus.tdsStatus = SensorStatus::WORKING;
+    }
+    printSensorData("TDS", rawValue, voltage, finalValue);
+    return finalValue;
+}
+
+float readORP() {
+    int rawValue = readAnalogStable(ORP_SENSOR_PIN);
+    float voltage = adcToVoltage(rawValue);
+    float orpValue = ((voltage * 1000) - 1036) / 2.5;
+    float finalValue = orpValue + sensorCal.orpOffset;
+
+    if (rawValue <= 0 || rawValue >= 4095) {
+        sensorStatus.orpStatus = SensorStatus::ERROR;
+        printSensorData("ORP", rawValue, voltage, 0);
+        return 0;
+    }
+    if (finalValue < 300) {
+        sensorStatus.orpStatus = SensorStatus::BELOW;
+    } else if (finalValue > 500) {
+        sensorStatus.orpStatus = SensorStatus::ABOVE;
+    } else {
+        sensorStatus.orpStatus = SensorStatus::WORKING;
+    }
+    printSensorData("ORP", rawValue, voltage, finalValue);
+    return finalValue;
+}
+
+float readDO() {
+    int rawValue = readAnalogStable(DO_SENSOR_PIN);
+    float voltage = adcToVoltage(rawValue);
+    float doValue = voltage * 100;
+    float finalValue = doValue + sensorCal.doOffset;
+
+    if (rawValue <= 0 || rawValue >= 4095) {
+        sensorStatus.doStatus = SensorStatus::ERROR;
+        printSensorData("DO", rawValue, voltage, 0);
+        return 0;
+    }
+    if (finalValue < 6.5) {
+        sensorStatus.doStatus = SensorStatus::BELOW;
+    } else if (finalValue > 8.0) {
+        sensorStatus.doStatus = SensorStatus::ABOVE;
+    } else {
+        sensorStatus.doStatus = SensorStatus::WORKING;
+    }
+    printSensorData("DO", rawValue, voltage, finalValue);
+    return finalValue;
+}
+
+float readTemperature() {
+    tempSensor.requestTemperatures();
+    float temperature = tempSensor.getTempCByIndex(0);
+    float finalValue = temperature + sensorCal.tempOffset;
+
+    if (temperature == DEVICE_DISCONNECTED_C) {
+        sensorStatus.tempStatus = SensorStatus::ERROR;
+        printSensorData("Temperature", -1, -1, 0);
+        return 0;
+    }
+    if (finalValue < 10) {
+        sensorStatus.tempStatus = SensorStatus::BELOW;
+    } else if (finalValue > 22) {
+        sensorStatus.tempStatus = SensorStatus::ABOVE;
+    } else {
+        sensorStatus.tempStatus = SensorStatus::WORKING;
+    }
+    printSensorData("Temperature", -1, -1, finalValue);
+    return finalValue;
+}
+
+void setup() {
+    Serial.begin(115200);
+    tempSensor.begin();
+    Serial.println("Sensor Reading Initialized");
+}
+
+void loop() {
+    sensorData.ph = readPH();
+    sensorData.tds = readTDS();
+    sensorData.orp = readORP();
+    sensorData.doValue = readDO();
+    sensorData.temperature = readTemperature();
+    
+    // Delay for readability
+    delay(1000);
+}

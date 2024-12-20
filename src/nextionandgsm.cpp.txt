@@ -1,0 +1,243 @@
+#define TINY_GSM_MODEM_SIM800
+
+#include <TinyGsmClient.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <time.h>
+
+// Pin Definisi Sensor
+#define PH_SENSOR_PIN     36  // GPIO36 (ADC0)
+#define ORP_SENSOR_PIN    39  // GPIO39 (ADC3)
+#define TDS_SENSOR_PIN    34  // GPIO34 (ADC6)
+#define DO_SENSOR_PIN     35  // GPIO35 (ADC7)
+#define TEMP_SENSOR_PIN   32  // GPIO32 (ADC4)
+
+// Set GSM and MQTT credentials
+const char apn[] = "internet";
+const char user[] = "water_quality";
+const char pass[] = "f98tYucDJ54HgXwa";
+const char broker[] = "112.78.33.179";
+const int brokerPort = 1883;
+
+// Hardware Serial untuk SIM800
+#define RX_PIN 16
+#define TX_PIN 17
+#define RST_PIN 15
+HardwareSerial SerialAT(1);
+
+// TinyGSM objek
+TinyGsm        modem(SerialAT);
+TinyGsmClient client(modem);
+PubSubClient mqtt(client);
+
+class WaterQualitySensors {
+private:
+  // Variabel kalibrasi sensor
+  struct SensorCalibration {
+    float phOffset = 0.0;
+    float orpOffset = 0.0;
+    float tdsOffset = 0.0;
+    float doOffset = 0.0;
+    float tempOffset = 0.0;
+  } sensorCal;
+
+  float readAnalogStable(int pin, int samples = 10) {
+    long total = 0;
+    for (int i = 0; i < samples; i++) {
+      total += analogRead(pin);
+      delay(10);
+    }
+    return (float)total / samples;
+  }
+
+  float adcToVoltage(int rawValue) {
+    return rawValue * (3.3 / 4095.0);
+  }
+
+public:
+  void begin() {
+    analogReadResolution(12);
+    analogSetAttenuation(ADC_11db);
+  }
+
+  float readPH() {
+    float voltage = adcToVoltage(readAnalogStable(PH_SENSOR_PIN));
+    float phValue = 7.0 + ((2.5 - voltage) / 0.257) + sensorCal.phOffset;
+    return constrain(phValue, 0, 14);
+  }
+
+  float readORP() {
+    float voltage = adcToVoltage(readAnalogStable(ORP_SENSOR_PIN));
+    float orpValue = ((voltage * 1000) - 1036) / 0.1;
+    return orpValue + sensorCal.orpOffset;
+  }
+
+  float readTDS() {
+    float voltage = adcToVoltage(readAnalogStable(TDS_SENSOR_PIN));
+    float tdsValue = (133.42 * voltage * voltage * voltage) - 
+                     (255.86 * voltage * voltage) + 
+                     (857.39 * voltage);
+    return tdsValue + sensorCal.tdsOffset;
+  }
+
+  float readDO() {
+    float voltage = adcToVoltage(readAnalogStable(DO_SENSOR_PIN));
+    float doValue = voltage * 100;
+    return doValue + sensorCal.doOffset;
+  }
+
+  float readTemperature() {
+    float voltage = adcToVoltage(readAnalogStable(TEMP_SENSOR_PIN));
+    float temperature = (voltage - 0.5) * 100;
+    return temperature + sensorCal.tempOffset;
+  }
+};
+
+WaterQualitySensors waterSensors;
+
+// Function prototypes
+void reconnectMQTT();
+String generateTimestamp();
+
+void setupModem() {
+  pinMode(RST_PIN, OUTPUT);
+  digitalWrite(RST_PIN, HIGH);
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  digitalWrite(RST_PIN, LOW);
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  digitalWrite(RST_PIN, HIGH);
+ 
+  Serial.println("Restarting modem...");
+  modem.restart();
+ 
+  String modemInfo = modem.getModemInfo();
+  Serial.print("Modem Info: ");
+  Serial.println(modemInfo);
+ 
+  Serial.println("Connecting to GSM network...");
+  if (!modem.waitForNetwork()) {
+    Serial.println("Network connection failed");
+    return;
+  }
+  Serial.println("Connected to GSM network");
+ 
+  Serial.println("Setting up GPRS...");
+  if (!modem.gprsConnect("internet", "", "")) {
+    Serial.println("GPRS connection failed");
+    return;
+  }
+  Serial.println("GPRS connected");
+}
+
+// Fungsi generate timestamp
+String generateTimestamp() {
+  time_t now = time(nullptr);
+  struct tm* p_tm = localtime(&now);
+  char buffer[20];
+  snprintf(buffer, sizeof(buffer), "%02d%02d%02d%02d%02d", 
+    p_tm->tm_mon + 1, p_tm->tm_mday, 
+    p_tm->tm_hour, p_tm->tm_min, p_tm->tm_sec);
+  return String(buffer);
+}
+int checkSensorStatus(float value, float minValidValue, float maxValidValue) {
+  if (value >= minValidValue && value <= maxValidValue) {
+    return 1; // Status 1 jika nilai dalam rentang valid
+  } else {
+    return 0; // Status 0 jika nilai tidak dalam rentang valid
+  }
+}
+void setup() {
+  Serial.begin(115200); // Debug serial
+  SerialAT.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
+  
+  // Inisialisasi sensor
+  waterSensors.begin();
+  
+  pinMode(RST_PIN, OUTPUT);
+
+  setupModem();
+
+  // Atur broker MQTT
+  mqtt.setServer(broker, brokerPort);
+}
+
+void loop() {
+  if (!mqtt.connected()) {
+    reconnectMQTT();
+  }
+  mqtt.loop();
+
+  // Buat data JSON
+ StaticJsonDocument<500> jsonDoc;
+  
+  // Tambahkan timestamp
+  jsonDoc["timestamp"] = generateTimestamp();
+
+  // ORP
+  float orpValue = waterSensors.readORP();
+  int orpStatus = checkSensorStatus(orpValue, -2000, 2000);  // Tentukan rentang valid ORP
+  JsonObject orpObj = jsonDoc.createNestedObject("orp");
+  orpObj["value"] = orpValue;
+  orpObj["unit"] = "mV";
+  orpObj["status"] = orpStatus;
+
+  // pH
+  float phValue = waterSensors.readPH();
+  int phStatus = checkSensorStatus(phValue, 0, 14);  // Rentang valid pH adalah 0-14
+  JsonObject phObj = jsonDoc.createNestedObject("ph");
+  phObj["value"] = phValue;
+  phObj["unit"] = "pH";
+  phObj["status"] = phStatus;
+
+  // TDS
+  float tdsValue = waterSensors.readTDS();
+  int tdsStatus = checkSensorStatus(tdsValue, 0, 10000);  // Rentang valid TDS, sesuaikan dengan kebutuhan
+  JsonObject tdsObj = jsonDoc.createNestedObject("tds");
+  tdsObj["value"] = tdsValue;
+  tdsObj["unit"] = "ppm";
+  tdsObj["status"] = tdsStatus;
+
+  // DO
+  float doValue = waterSensors.readDO();
+  int doStatus = checkSensorStatus(doValue, 0, 20);  // Rentang valid DO, sesuaikan dengan kebutuhan
+  JsonObject doObj = jsonDoc.createNestedObject("do");
+  doObj["value"] = doValue;
+  doObj["unit"] = "mg/L";
+  doObj["status"] = doStatus;
+
+  // Suhu
+  float temperatureValue = waterSensors.readTemperature();
+  int tempStatus = checkSensorStatus(temperatureValue, -10, 50);  // Rentang valid suhu, sesuaikan dengan kebutuhan
+  JsonObject tempObj = jsonDoc.createNestedObject("temperature");
+  tempObj["value"] = temperatureValue;
+  tempObj["unit"] = "°C";
+  tempObj["status"] = tempStatus;
+
+  // Konversi JSON ke string
+  char jsonBuffer[500];
+  serializeJson(jsonDoc, jsonBuffer);
+
+  // Publish data JSON ke MQTT
+  if (mqtt.publish("/varx/water-quality/testing", jsonBuffer)) {
+    Serial.println("JSON data sent successfully!");
+    Serial.println(jsonBuffer);
+  } else {
+    Serial.println("Failed to send JSON data");
+  }
+  
+  delay(5000); // Kirim setiap 5 detik
+}
+
+void reconnectMQTT() {
+  while (!mqtt.connected()) {
+    Serial.print("Connecting to MQTT broker...");
+    if (mqtt.connect("ESP32Client", user, pass)) {
+      Serial.println("Connected to MQTT broker!");
+    } else {
+      Serial.print("Failed, rc=");
+      Serial.print(mqtt.state());
+      Serial.println(" Retrying in 5 seconds...");
+      delay(5000);
+    }
+  }
+}

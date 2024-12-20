@@ -1,0 +1,192 @@
+#define TINY_GSM_MODEM_SIM800
+
+#include <TinyGsmClient.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <time.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
+#include <EasyNextionLibrary.h> // Library untuk Nextion
+
+// Definisi Pin
+#define PH_SENSOR_PIN     36
+#define ORP_SENSOR_PIN    39
+#define TDS_SENSOR_PIN    34
+#define DO_SENSOR_PIN     35
+#define TEMP_SENSOR_PIN   32
+
+#define RX_PIN_GSM 16
+#define TX_PIN_GSM 17
+#define RST_PIN 15
+
+#define RX_PIN_NEXTION 18
+#define TX_PIN_NEXTION 19
+
+// Credentials
+const char apn[] = "internet";
+const char user[] = "water_quality";
+const char pass[] = "f98tYucDJ54HgXwa";
+const char broker[] = "112.78.33.179";
+const int brokerPort = 1883;
+
+// Hardware Serial
+HardwareSerial SerialAT(1); // Untuk SIM800
+HardwareSerial SerialNextion(2); // Untuk Nextion
+
+// TinyGSM objek
+TinyGsm modem(SerialAT);
+TinyGsmClient client(modem);
+PubSubClient mqtt(client);
+
+// Nextion objek
+EasyNex myNextion(SerialNextion);
+
+// Semaphore untuk sinkronisasi
+SemaphoreHandle_t xMQTTMutex;
+SemaphoreHandle_t xSerialMutex;
+
+// Struktur data sensor
+typedef struct {
+    float ph;
+    float orp;
+    float tds;
+    float doValue;
+    float temperature;
+    bool isConnected;
+} SensorData;
+
+SensorData xSensorData;
+
+// Variabel status
+String mqttStatus = "Disconnected";
+
+// Deklarasi task handles
+TaskHandle_t xTaskSensorRead = NULL;
+TaskHandle_t xTaskMQTTPublish = NULL;
+TaskHandle_t xTaskModemManage = NULL;
+
+// Fungsi utilitas
+String getDayOfWeek(int wday) {
+    const char *days[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+    return String(days[wday]);
+}
+
+String generateTimestamp() {
+    time_t now = time(nullptr);
+    struct tm* p_tm = localtime(&now);
+    char buffer[20];
+    snprintf(buffer, sizeof(buffer), "%02d-%02d-%d %02d:%02d:%02d", 
+        p_tm->tm_mday, p_tm->tm_mon + 1, p_tm->tm_year + 1900, 
+        p_tm->tm_hour, p_tm->tm_min, p_tm->tm_sec);
+    return String(buffer);
+}
+
+void updateNextionDisplay() {
+    // Update Nextion text fields
+    myNextion.writeStr("t0.txt", getDayOfWeek(localtime(nullptr)->tm_wday));
+    myNextion.writeStr("t1.txt", generateTimestamp().substring(0, 10)); // Tanggal
+    myNextion.writeStr("t2.txt", generateTimestamp().substring(11));   // Waktu
+    
+    myNextion.writeStr("t3.txt", String(xSensorData.ph));
+    myNextion.writeStr("t4.txt", String(xSensorData.tds));
+    myNextion.writeStr("t5.txt", String(xSensorData.orp));
+    myNextion.writeStr("t6.txt", String(xSensorData.doValue));
+    myNextion.writeStr("t7.txt", String(xSensorData.temperature));
+
+    myNextion.writeStr("t12.txt", xSensorData.isConnected ? "Working" : "Error");
+    myNextion.writeStr("t13.txt", xSensorData.isConnected ? "Working" : "Error");
+    myNextion.writeStr("t14.txt", xSensorData.isConnected ? "Working" : "Error");
+    myNextion.writeStr("t15.txt", xSensorData.isConnected ? "Working" : "Error");
+    myNextion.writeStr("t16.txt", xSensorData.isConnected ? "Working" : "Error");
+}
+
+// Task untuk membaca sensor
+void vTaskSensorRead(void *pvParameters) {
+    for (;;) {
+        xSensorData.ph = random(5, 9); // Simulasi data
+        xSensorData.orp = random(300, 800);
+        xSensorData.tds = random(200, 500);
+        xSensorData.doValue = random(5, 10);
+        xSensorData.temperature = random(25, 35);
+
+        xSensorData.isConnected = true; // Indikasi sensor terhubung
+
+        if (xSemaphoreTake(xSerialMutex, portMAX_DELAY) == pdTRUE) {
+            Serial.println("Sensor data updated");
+            xSemaphoreGive(xSerialMutex);
+        }
+
+        updateNextionDisplay(); // Perbarui layar Nextion
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+
+// Task untuk publish MQTT
+void vTaskMQTTPublish(void *pvParameters) {
+    for (;;) {
+        if (xSemaphoreTake(xMQTTMutex, portMAX_DELAY) == pdTRUE) {
+            StaticJsonDocument<500> jsonDoc;
+            jsonDoc["timestamp"] = generateTimestamp();
+            
+            JsonObject phObj = jsonDoc.createNestedObject("ph");
+            phObj["value"] = xSensorData.ph;
+            phObj["unit"] = "pH";
+            phObj["status"] = xSensorData.isConnected ? "Working" : "Error";
+
+            JsonObject tdsObj = jsonDoc.createNestedObject("tds");
+            tdsObj["value"] = xSensorData.tds;
+            tdsObj["unit"] = "ppm";
+            tdsObj["status"] = xSensorData.isConnected ? "Working" : "Error";
+
+            JsonObject orpObj = jsonDoc.createNestedObject("orp");
+            orpObj["value"] = xSensorData.orp;
+            orpObj["unit"] = "mV";
+            orpObj["status"] = xSensorData.isConnected ? "Working" : "Error";
+
+            JsonObject doObj = jsonDoc.createNestedObject("do");
+            doObj["value"] = xSensorData.doValue;
+            doObj["unit"] = "mg/L";
+            doObj["status"] = xSensorData.isConnected ? "Working" : "Error";
+
+            JsonObject tempObj = jsonDoc.createNestedObject("temperature");
+            tempObj["value"] = xSensorData.temperature;
+            tempObj["unit"] = "°C";
+            tempObj["status"] = xSensorData.isConnected ? "Working" : "Error";
+
+            char jsonBuffer[500];
+            serializeJson(jsonDoc, jsonBuffer);
+
+            if (mqtt.publish("/varx/water-quality/testing", jsonBuffer)) {
+                mqttStatus = "Connected";
+                if (xSemaphoreTake(xSerialMutex, portMAX_DELAY) == pdTRUE) {
+                    Serial.println("MQTT data published");
+                    xSemaphoreGive(xSerialMutex);
+                }
+            } else {
+                mqttStatus = "Disconnected";
+            }
+
+            xSemaphoreGive(xMQTTMutex);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    SerialAT.begin(9600, SERIAL_8N1, RX_PIN_GSM, TX_PIN_GSM);
+    SerialNextion.begin(9600, SERIAL_8N1, RX_PIN_NEXTION, TX_PIN_NEXTION);
+
+    myNextion.begin();
+    xMQTTMutex = xSemaphoreCreateMutex();
+    xSerialMutex = xSemaphoreCreateMutex();
+
+    xTaskCreate(vTaskSensorRead, "SensorTask", 4096, NULL, 1, &xTaskSensorRead);
+    xTaskCreate(vTaskMQTTPublish, "MQTTPublishTask", 8192, NULL, 2, &xTaskMQTTPublish);
+}
+
+void loop() {
+    vTaskDelay(portMAX_DELAY);
+}
